@@ -1,0 +1,212 @@
+pool: "MCOV on-prem"
+
+parameters:
+
+# How old images to delete
+  - name: imageDaysOld
+    displayName: "Image age treshold"
+    type: number
+    default: 30
+
+# By default nothing is deleted. Do not change this here.
+  - name: realRun
+    displayName: "Test run (test), real run (realRun)"
+    type: string
+    default: "test"
+
+# Coma separated list of recipients
+  - name: mailTo
+    displayName: "Send report to:"
+    type: string
+    default: "nowackim@medicover.pl"
+
+variables:
+- group: "ACR Cleaner"
+- name: "azureRegistryName"
+  value: "mcovglobal"
+- name: azureSubscription
+  value: 'mcovglobal-ACR'
+- name: azureImageList
+  value: "azure.images"
+- name: k8sImageList
+  value: "k8s.images"
+- name: notusedImageList
+  value: "notUsed.images"
+- name: usedImageList
+  value: "used.images"
+- name: k8sListsFolder
+  value: "k8sLists"
+- name: oldusedImageList
+  value: "usedOld.images"
+- name: "mailFrom"
+  value: "reports-azuredevops@medicover.pl"
+- name: "mailSubject"
+  value: "Report: Old images on mcovglobal ACR"
+
+stages:
+- stage: A
+  jobs:
+## Process Azure
+
+  - job: Azure
+    steps:
+# Dump images from Azure to a file
+    - task: AzureCLI@2
+      displayName: "Dump images from Azure to a file"
+      enabled: true
+      timeoutInMinutes: 5
+      inputs:
+        azureSubscription: ${{ variables.azureSubscription }}
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: 'acrImageCleaner/getAzureImages.sh ${{ variables.azureRegistryName }} ${{ variables.azureImageList }}'
+
+# Publish as artifact
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: '${{ variables.azureImageList }}'
+        artifact: 'imagesAzure'
+        publishLocation: 'pipeline'
+
+# [DEBUG] Dump Azure images to stdout
+    - task: Bash@3
+      displayName: "[INFO] Dump Azure images to stdout"
+      enabled: true
+      timeoutInMinutes: 1
+      inputs:
+        targetType: 'inline'
+        script: 'cat ${{ variables.azureImageList }}'
+
+## Process K8s
+
+###### Place to add more clusters ######
+# NAME must be consistent to naming convention! Ex. mcov-pl-test1, mtech-ro-dev4, snvo-pl-stage1 etc.
+
+  - job: K8s
+    dependsOn: Azure
+    strategy:
+      matrix:
+        MCOV_PL_SS:
+          IP: "10.6.11.38"
+          TOKEN: $(MCOV-PL-SS_TOKEN)
+          NAME: "mcov-pl-ss"
+        MCOV_PL_PREPROD:
+          IP: "10.6.11.37"
+          TOKEN: $(MCOV-PL-PREPROD_TOKEN)
+          NAME: "mcov-pl-preprod"
+        MCOV_PL_PROD:
+          IP: "10.6.11.112"
+          TOKEN: $(MCOV-PL-PROD_TOKEN)
+          NAME: "mcov-pl-prod"
+        MTECH_RO_KB1:
+          IP: "10.0.2.66"
+          TOKEN: $(MTECH-RO-KB1_TOKEN)
+          NAME: "mtech-ro-kb1"
+      maxParallel: 1
+########################################
+
+    steps:
+
+# Dump images from K8s clusters to a file
+    - task: Bash@3
+      displayName: "Dump images from K8s clusters to a file"
+      enabled: true
+      timeoutInMinutes: 1
+      env:
+        accessToken: $(TOKEN)
+      inputs:
+        targetType: 'inline'
+        script: 'acrImageCleaner/getK8sImages.sh ${{ variables.azureRegistryName }} $(IP) $(NAME)'
+
+# [DEBUG] Dump K8s images to stdout
+    - task: Bash@3
+      displayName: "[INFO] Dump K8s images to stdout"
+      enabled: true
+      timeoutInMinutes: 1
+      inputs:
+        targetType: 'inline'
+        script: 'cat $(NAME)'
+
+# Publish as artifact
+    - task: PublishPipelineArtifact@1
+      inputs:        
+        targetPath: '$(NAME)'
+        artifactName: '$(NAME)'
+        publishLocation: 'pipeline'
+
+## Search and remove images
+  - job: DeleteAndReport
+    dependsOn: K8s
+    steps:
+
+# Download artifacts
+    - task: DownloadPipelineArtifact@2
+      inputs:
+        buildType: 'current'
+        targetPath: '$(System.DefaultWorkingDirectory)/${{ variables.k8sListsFolder }}'
+
+# Dump all images to one file
+    - task: Bash@3
+      displayName: "Dump all images to one file"
+      enabled: true
+      timeoutInMinutes: 1
+      inputs:
+        targetType: 'inline'
+        script: 'for file in $(find ${{ variables.k8sListsFolder }}/ -type f -regex "^${{ variables.k8sListsFolder }}\/[a-z]+\-.*");do cat $file >> ${{variables.k8sImageList}};done'
+
+# Dump not used images to a file
+    - task: Bash@3
+      displayName: "Dump not used images to a file"
+      enabled: true
+      timeoutInMinutes: 1
+      inputs:
+        targetType: 'inline'
+        script: 'acrImageCleaner/searchNotUsed.sh ${{ variables.k8sListsFolder }}/imagesAzure/${{ variables.azureImageList }} ${{ variables.k8sImageList }} ${{ variables.notusedImageList }} ${{ variables.usedImageList }}'
+
+# [DEBUG] Dump not used images to stdout
+    - task: Bash@3
+      displayName: "[INFO] Dump not used images to stdout"
+      enabled: true
+      timeoutInMinutes: 1
+      continueOnError: true
+      inputs:
+        targetType: 'inline'
+        script: 'if [[ ! -s ${{ variables.notusedImageList }} ]]; then echo "No images found in a file"; else cat ${{ variables.notusedImageList }}; exit 0;fi'
+
+# Delete old, unused images
+    - task: AzureCLI@2
+      displayName: "Delete old, unused images"
+      enabled: true
+      timeoutInMinutes: 2
+      inputs:
+        azureSubscription: ${{ variables.azureSubscription }}
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: 'acrImageCleaner/deleteImages.sh ${{ variables.azureRegistryName }} ${{ variables.k8sListsFolder }}/imagesAzure/${{ variables.azureImageList }} ${{ variables.notusedImageList }} ${{ parameters.imageDaysOld }} ${{ parameters.realRun }}'
+
+# Dump old, but still used images to a file
+    - task: Bash@3
+      displayName: "Dump old, but still used images to a file"
+      enabled: true
+      timeoutInMinutes: 1
+      inputs:
+        targetType: 'inline'
+        script: 'acrImageCleaner/searchUsedOld.sh ${{ variables.k8sListsFolder }}/imagesAzure/${{ variables.azureImageList }} ${{ variables.usedImageList }} ${{ variables.oldusedImageList }} ${{ parameters.imageDaysOld }}'
+
+# Dump old, but still used images to stdout
+    - task: Bash@3
+      displayName: "[INFO] Dump old, but still used images to stdout"
+      enabled: true
+      timeoutInMinutes: 1
+      inputs:
+        targetType: 'inline'
+        script: 'cat ${{ variables.oldusedImageList }}'
+        
+# Send report of old images
+    - task: Bash@3
+      displayName: "Send report of old images"
+      enabled: true
+      timeoutInMinutes: 1
+      inputs:
+        targetType: 'inline'
+        script: 'acrImageCleaner/sendEmail.sh ${{ variables.mailFrom }} ${{ parameters.mailTo }} "${{ variables.mailSubject }}" ${{ variables.oldusedImageList }}'
