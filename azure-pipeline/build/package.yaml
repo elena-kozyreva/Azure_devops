@@ -1,0 +1,27 @@
+name: Azure-DevOps-Package
+trigger:
+  branches:
+    include:
+      - develop
+      - master
+
+variables:
+  buildConfiguration: 'Release'
+
+jobs:
+  - job: package_application
+    pool:
+        vmImage: 'windows-latest'
+    steps:
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet publish'
+      inputs:
+        command: publish
+        publishWebProjects: false
+        projects: src/MyProject/MyProject.csproj
+        arguments: '--output $(Build.ArtifactStagingDirectory) --version-suffix $(Build.BuildNumber) --configuration $(buildConfiguration)'
+        zipAfterPublish: false
+        modifyOutputPath: false
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact: drop'
