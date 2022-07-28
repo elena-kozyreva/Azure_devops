@@ -36,6 +36,7 @@ az acr import \
 
 
 <h3>Hello world image</h3>
+
 ```
 az acr import \
   --name $REGISTRY_NAME \
