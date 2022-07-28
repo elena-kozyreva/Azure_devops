@@ -42,3 +42,4 @@ az acr import \
   --name $REGISTRY_NAME \
   --source mcr.microsoft.com/hello-world:1.1.2
 ```
+
